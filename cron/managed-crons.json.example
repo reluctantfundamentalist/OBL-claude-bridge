@@ -1,0 +1,17 @@
+{
+  "_comment": "Crons that run inside the live Claude Code session via CronCreate. The hooks/init.py output instructs Claude to re-register any missing entries on session start. Times are local. Off-the-hour minutes recommended per CronCreate guidance.",
+  "jobs": [
+    {
+      "name": "Morning Briefing",
+      "cron": "57 7 * * *",
+      "description": "Daily 8am local. Sweep mail + messaging, synthesise into a tight briefing.",
+      "prompt": "ONYX_CRON: Morning Briefing.\n\nSTEP 1 - Email: search inbox for new threads in last 24h\nSTEP 2 - Messaging: check Telegram inbox for DMs and named groups\n\nSynthesise into a tight briefing:\n- Urgent / needs action today\n- Meetings or calls today/tomorrow\n- Notable messages from key contacts\n- Skip newsletters and automated alerts\n\nReply via Telegram (mcp__plugin_telegram_telegram__reply, chat_id <YOUR_CHAT_ID>)."
+    },
+    {
+      "name": "Weekly Review",
+      "cron": "13 9 * * 0",
+      "description": "Sunday morning weekly review.",
+      "prompt": "ONYX_CRON: Weekly Review. Summarise the past week's brain extractions, decisions, and pending action items. Reply via Telegram chat_id <YOUR_CHAT_ID>."
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+.env
+.env.local
+.claude/scheduled_tasks*
+.claude/sessions/
+.claude/channels/
+*.log
+*.pyc
+__pycache__/
+launchd/jobs/*.plist
+!launchd/jobs/*.plist.template
