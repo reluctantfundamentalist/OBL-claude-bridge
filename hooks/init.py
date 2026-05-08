@@ -17,7 +17,7 @@ MANAGED_CRONS = Path.home() / "onyx-claude-bridge" / "cron" / "onyx-managed-cron
 
 IDENTITY_HINTS = os.environ.get(
     "BRIDGE_IDENTITY_HINTS",
-    "identity beliefs operating principles assistant brain",
+    "Onyx identity beliefs operating principles Ganesh assistant brain",
 )
 
 

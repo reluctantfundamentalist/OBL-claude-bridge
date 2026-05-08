@@ -16,7 +16,7 @@ CONTEXT_SCRIPT = CASHEW_DIR / "context.py"
 
 IDENTITY_HINTS = os.environ.get(
     "BRIDGE_IDENTITY_HINTS",
-    "identity beliefs operating principles assistant brain",
+    "Onyx identity beliefs operating principles Ganesh assistant brain",
 )
 RECENT_HINTS = "recent projects decisions active work TODO commitments"
 

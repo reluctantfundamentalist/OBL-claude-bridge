@@ -1,0 +1,48 @@
+{
+  "_comment": "Crons that run inside the live Onyx session via CronCreate. The hooks/init.py output instructs Claude to re-register any missing entries on session start. Times are Asia/Dubai local. Off-the-hour minutes used per CronCreate guidance.",
+  "jobs": [
+    {
+      "name": "Morning Briefing",
+      "cron": "57 7 * * *",
+      "description": "Daily 8am Dubai. Gmail (personal + Further) + Telegram inbox sweep, synthesized brief.",
+      "prompt": "ONYX_CRON: Morning Briefing.\n\nSTEP 1 \u2014 Gmail personal: gog gmail search 'newer_than:24h in:inbox' --max 30 --account YOUR_PERSONAL_GMAIL@gmail.com\nSTEP 2 \u2014 Gmail Further: gog gmail search 'newer_than:48h in:inbox' --max 30 --account YOUR_WORK_EMAIL@yourdomain.com\nSTEP 3 \u2014 Telegram: tg inbox (focus DMs + named groups; skip Binance Killers, Margin Sniper, MYX.Finance and other bulk signal channels)\n\nSynthesize into tight briefing:\n\ud83d\udea8 Urgent / needs action today\n\ud83d\udcc5 Meetings or calls today/tomorrow (check calendar invites)\n\ud83d\udcac Notable messages from founders, investors, key contacts\n\ud83d\udccc Anything on Canton, Chainlink, SUI, Plasma, Linea, Zama or portfolio (Pave Bank, Immersve, GRVT, Libre, Optimum)\n\ud83d\udcb0 Financial alerts (Zerodha, FAB, ADCB)\n\ud83d\uddd1\ufe0f Skip newsletters and automated alerts\n\nBrief bullets. Lead with most important. No fluff. Reply via Telegram (mcp__plugin_telegram_telegram__reply, chat_id YOUR_TELEGRAM_CHAT_ID).\n\nCRITICAL: Do NOT write any files to ~/.openclaw/workspace/ or ~/.openclaw/workspace/memory/."
+    },
+    {
+      "name": "Onyx Brain Research",
+      "cron": "27 3 * * *",
+      "description": "Daily 5am Kolkata = 3:30am Dubai. Consciousness/tech research into onyx_brain.db.",
+      "prompt": "ONYX_CRON: Onyx Brain Research (consciousness/tech).\n\nRun: python3 ~/.openclaw/workspace/graph/onyx_research.py --limit 3 2>&1 | tail -40\n\nReport via Telegram (chat_id YOUR_TELEGRAM_CHAT_ID): queries researched, nodes added, edges linked, domains detected.\n\nCRITICAL: onyx_brain.db is the only write target. Do NOT write to ~/.openclaw/workspace/ or memory/."
+    },
+    {
+      "name": "Evolve",
+      "cron": "13 16 * * *",
+      "description": "Daily 5:45pm Kolkata = 4:15pm Dubai. Architecture proposal engine on onyx_brain.db.",
+      "prompt": "ONYX_CRON: Evolve architecture proposals.\n\nRun: python3 ~/.openclaw/workspace/graph/evolve.py 2>&1 | tail -30\n\nReport via Telegram (chat_id YOUR_TELEGRAM_CHAT_ID): proposals generated, how many sent (confidence \u226582%), errors.\n\nevolve.py reads onyx_brain.db only \u2014 never touch brain.db. Do NOT write to ~/.openclaw/workspace/ or memory/."
+    },
+    {
+      "name": "Infra Pipeline Tracker",
+      "cron": "57 4 * * 3",
+      "description": "Wed 5am Dubai. Web search Canton/Chainlink/SUI/Plasma/Linea/Zama for governance and validator updates.",
+      "prompt": "ONYX_CRON: Infra Pipeline Tracker (weekly Wed).\n\nWeb search last 7 days for governance proposals, validator updates, foundation news, major protocol changes:\n1. Canton Network \u2014 Super Validator status, governance votes\n2. Chainlink \u2014 Staking v2, BUILD, oracle changes, MoU progress\n3. SUI \u2014 validator economics, delegation, upgrades\n4. Plasma \u2014 updates, unlocks, UAE/MENA strategy\n5. Linea \u2014 sequencer decentralization, validator program, governance\n6. Zama \u2014 FHE network, testnet, validator/node program\n\nFormat per network:\n\ud83d\udd17 [Network]\n- Status update\n- Proposals or votes to be aware of\n- Action needed? (yes/no + what)\n\nOnly include networks with actual updates. Flag anything needing Ganesh's attention.\n\nReply via Telegram chat_id YOUR_TELEGRAM_CHAT_ID."
+    },
+    {
+      "name": "Portfolio Weekly",
+      "cron": "57 4 * * 4",
+      "description": "Thu 5am Dubai. Web search Further Ventures portfolio companies for news.",
+      "prompt": "ONYX_CRON: Portfolio Weekly Summary (Thu).\n\nFor each Further Ventures portfolio company, web search recent news, funding rounds, product launches, regulatory updates, competitor moves:\n- Pave Bank (neo-bank)\n- Immersve (crypto payments)\n- GRVT (hybrid exchange)\n- Libre / Kaio (tokenization)\n- Optimum (DeFi)\n- Soter (digital asset insurance)\n- Kemet\n- Dora\n- BridgePort\n\nFormat:\n\ud83d\udcca [Company]\n- What's new (if anything)\n- Competitive shift (if relevant)\n- Flag if needs Ganesh's attention\n\nSkip companies with no news. Lead with most notable.\n\nReply via Telegram chat_id YOUR_TELEGRAM_CHAT_ID."
+    },
+    {
+      "name": "Onyx Self-Introspection",
+      "cron": "47 9,21 * * *",
+      "description": "Twice daily 9:47am + 9:47pm Dubai. Runs self_introspection.py against onyx_brain.db to investigate highest-surprise gaps. Migrated 2026-04-30 from openclaw cron (was failing on openrouter/qwen3.5-7b timeout) to in-session execution on Opus.",
+      "prompt": "ONYX_CRON: Self-Introspection.\n\nRun: python3 ~/.openclaw/workspace/graph/self_introspection.py 2>&1 | tail -25\n\nReport via Telegram (chat_id YOUR_TELEGRAM_CHAT_ID): gap investigated, nodes written, bridges linked, dopamine score, any errors.\n\nCRITICAL: onyx_brain.db is the only write target. Do NOT write to ~/.openclaw/workspace/ or memory/."
+    },
+    {
+      "name": "MetaCog Layer 1 First Read",
+      "cron": "13 9 3 5 *",
+      "one_shot": true,
+      "description": "One-time read of metacog.db data Sun 3 May 2026 9:13am Dubai. Auto-deletes after fire.",
+      "prompt": "(see CronCreate id 6685d502 \u2014 one-shot, not auto-re-registered)"
+    }
+  ]
+}

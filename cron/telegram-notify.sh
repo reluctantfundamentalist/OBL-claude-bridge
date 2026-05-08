@@ -1,5 +1,5 @@
 #!/bin/bash
-# Send a message via Telegram.
+# Send a message to Ganesh via Telegram.
 # Usage:
 #   echo "message" | bash telegram-notify.sh
 #   bash telegram-notify.sh "direct message"

@@ -79,9 +79,7 @@ def _message_text(msg: dict) -> str:
         if btype == "text":
             parts.append(block.get("text", ""))
         elif btype == "thinking":
-            thought = block.get("thinking", "")
-            if thought:
-                parts.append(f"thinking: {thought}")
+            pass  # Never surface thinking blocks to end users
     return "\n\n".join(p for p in parts if p)
 
 
@@ -244,19 +242,63 @@ def _send_message(
             f.write(json.dumps(payload) + "\n")
         return True, ""
     url = f"{BOT_API_BASE}/bot{token}/sendMessage"
-    data = urllib.parse.urlencode(
-        {k: (json.dumps(v) if not isinstance(v, str) else v) for k, v in payload.items()}
-    ).encode()
-    req = urllib.request.Request(url, data=data, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            parsed = json.loads(body)
+    # Use curl instead of urllib. UAE ISP intermittently breaks Python's
+    # ssl.SSLContext TLS handshake to api.telegram.org; curl's libssl/openssl
+    # path handles the same conditions cleanly. Shells out per attempt.
+    import subprocess as _subprocess
+    import shlex as _shlex
+
+    form_args: list[str] = []
+    for k, v in payload.items():
+        sv = json.dumps(v) if not isinstance(v, str) else v
+        form_args.extend(["--data-urlencode", f"{k}={sv}"])
+
+    last_err = ""
+    for attempt in range(4):
+        if attempt > 0:
+            import time as _retry_time
+            _retry_time.sleep(0.5 * (2 ** (attempt - 1)))  # 0.5s, 1s, 2s
+        try:
+            cmd = [
+                "curl", "-sS", "--fail-with-body",
+                "--max-time", "30",
+                "--connect-timeout", "10",
+                "--retry", "0",  # we handle retries ourselves
+                "-X", "POST",
+                *form_args,
+                url,
+            ]
+            proc = _subprocess.run(
+                cmd, capture_output=True, text=True, timeout=35,
+            )
+            if proc.returncode != 0:
+                last_err = f"curl exit {proc.returncode}: {(proc.stderr or proc.stdout)[:200].strip()}"
+                # Telegram 4xx (bad payload, invalid chat) won't recover via retry.
+                # curl --fail-with-body sets exit 22 for HTTP >= 400; check the body
+                # for Telegram's "ok=false" + non-server error, bail early.
+                if proc.returncode == 22 and proc.stdout:
+                    try:
+                        parsed = json.loads(proc.stdout)
+                        if not parsed.get("ok") and parsed.get("error_code", 500) < 500:
+                            return False, parsed.get("description", proc.stdout)
+                    except Exception:
+                        pass
+                continue
+            try:
+                parsed = json.loads(proc.stdout)
+            except Exception as e:
+                last_err = f"json parse: {e}: {proc.stdout[:200]}"
+                continue
             if not parsed.get("ok"):
-                return False, parsed.get("description", body)
+                return False, parsed.get("description", proc.stdout)
             return True, ""
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
+        except _subprocess.TimeoutExpired:
+            last_err = "curl subprocess timeout (>35s)"
+        except FileNotFoundError:
+            return False, "curl not found on PATH; install curl or restore urllib path"
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+    return False, last_err
 
 
 def main() -> int:
@@ -293,6 +335,23 @@ def main() -> int:
         _log("skip", reason="no_tail_text_after_retries", attempts=attempt + 1)
         return 0
 
+    # ── Telemetry FIRST (always, before any delivery-path early returns) ──
+    # Previously this lived after the reply_tool_called / no_chat_id early
+    # exits, which meant any turn delivered via reply tool or fired from CLI
+    # was silently dropped from metacog. Move it here so it fires for every
+    # assistant turn regardless of how the text gets to the user.
+    _early_buf = "\n\n".join(t for t in (_message_text(am).strip() for am in assistant_msgs) if t)
+    _early_tool_uses: list[str] = []
+    for am in assistant_msgs:
+        _early_tool_uses.extend(_tool_uses(am))
+    _inbound_chat_pre, _ = _extract_channel_info(_message_text(user_msg))
+    _metacog_write_assistant(
+        _early_buf,
+        _early_tool_uses,
+        session_id=payload.get("session_id"),
+        channel="telegram" if _inbound_chat_pre else "cli",
+    )
+
     inbound_text = _message_text(user_msg)
     chat_id, reply_msg_id = _extract_channel_info(inbound_text)
 
@@ -322,17 +381,7 @@ def main() -> int:
             return 0
     parts = [t for t in (_message_text(am).strip() for am in assistant_msgs) if t]
     buf = "\n\n".join(parts) if parts else ""
-
-    # Telemetry: log assistant turn regardless of delivery path. Never blocks.
-    asst_tool_uses: list[str] = []
-    for am in assistant_msgs:
-        asst_tool_uses.extend(_tool_uses(am))
-    _metacog_write_assistant(
-        buf,
-        asst_tool_uses,
-        session_id=payload.get("session_id"),
-        channel="telegram" if chat_id else "cli",
-    )
+    # (telemetry was already written above, before delivery-path branches)
 
     if not parts:
         _log("skip", reason="no_text", chat_id=chat_id)
@@ -340,15 +389,35 @@ def main() -> int:
 
     import hashlib
     sig = hashlib.sha1(f"{chat_id}:{buf}".encode()).hexdigest()[:12]
+    # Dedup logic (May 3 v3): the May 3 v2 patch introduced a regression — same
+    # content sig was being sent repeatedly across turns (transcript-reading
+    # race causing hook to grab stale assistant text). Restore the original
+    # last-20-events window AND add a 30-minute hard time cap as a guard against
+    # the original false-positive concern (legit same-content repeat after a long
+    # gap). 30 min is long enough to absorb any reasonable repeat-question-with-
+    # same-answer pattern, short enough that a fresh-day greeting still sends.
     if DELIVERY_LOG.exists():
+        import time as _t
+        from datetime import datetime as _dt
+        now_epoch = _t.time()
         for line in DELIVERY_LOG.read_text().splitlines()[-20:]:
             try:
                 rec = json.loads(line)
             except Exception:
                 continue
-            if rec.get("event") == "send_ok" and rec.get("sig") == sig:
-                _log("skip", reason="duplicate", chat_id=chat_id, sig=sig)
-                return 0
+            if rec.get("event") != "send_ok" or rec.get("sig") != sig:
+                continue
+            # Same content sig in the last 20 events → suppress UNLESS that
+            # prior send was >30 min ago (in which case treat as legitimate
+            # fresh repeat).
+            try:
+                prev_epoch = _dt.fromisoformat(rec.get("ts", "")).timestamp()
+                if now_epoch - prev_epoch > 1800:  # >30 min ago = legit repeat
+                    continue
+            except Exception:
+                pass  # if ts unparseable, fall through to dedup
+            _log("skip", reason="duplicate", chat_id=chat_id, sig=sig)
+            return 0
     if not buf.strip():
         _log("skip", reason="no_text", chat_id=chat_id)
         return 0

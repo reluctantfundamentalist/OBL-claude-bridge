@@ -80,20 +80,24 @@ def _metacog_write(payload: dict, channel: str) -> None:
 
 
 def _react(token: str, chat_id: str, message_id: str, emoji: str = "\U0001f440") -> tuple[bool, str]:
+    import subprocess as _sp
     url = f"https://api.telegram.org/bot{token}/setMessageReaction"
-    payload = {
+    payload = json.dumps({
         "chat_id": int(chat_id),
         "message_id": int(message_id),
         "reaction": [{"type": "emoji", "emoji": emoji}],
-    }
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}, method="POST"
-    )
+    })
     try:
-        with urllib.request.urlopen(req, timeout=5) as r:
-            body = r.read().decode()
-            return True, body
+        proc = _sp.run(
+            ["curl", "-sS", "--fail-with-body", "--max-time", "10",
+             "--connect-timeout", "5", "-X", "POST",
+             "-H", "Content-Type: application/json",
+             "-d", payload, url],
+            capture_output=True, text=True, timeout=12,
+        )
+        if proc.returncode != 0:
+            return False, f"curl exit {proc.returncode}: {(proc.stderr or proc.stdout)[:200]}"
+        return True, proc.stdout
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
 
