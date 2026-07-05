@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Stop hook: auto-deliver assistant text to Telegram.
+"""Feishu stop hook — auto-deliver assistant text via Feishu Bot API.
 
 Fires when Claude finishes an assistant turn. If the user turn that triggered
-this response came from a Telegram channel AND the assistant turn emitted
-user-facing text AND no tool-based telegram reply was sent, this hook POSTs
-the text directly to the Telegram bot API.
+this response came from a Feishu channel AND the assistant turn emitted
+user-facing text AND no tool-based Feishu reply was sent, this hook POSTs
+the text directly to the Feishu bot API.
 
-The assistant does not need to remember to call the reply tool — delivery
-becomes deterministic.
+This is a supplementary delivery layer on top of OpenClaw's native delivery.
+It provides extra reliability (dedup, retries, chunking) and metacog telemetry.
 """
 
 from __future__ import annotations
@@ -16,24 +16,22 @@ import json
 import os
 import re
 import sys
-import urllib.parse
+import time
 import urllib.request
 from pathlib import Path
 
-TELEGRAM_REPLY_TOOL = "mcp__plugin_telegram_telegram__reply"
-TELEGRAM_CHANNEL_RE = re.compile(
-    r'<channel\s+source=(?:"plugin:telegram:[^"]*"|\\"plugin:telegram:[^"]*\\")(?P<attrs>[^>]*)>',
+FEISHU_CHANNEL_RE = re.compile(
+    r'<channel\s+source="plugin:feishu:[^"]*"(?P<attrs>[^>]*)>',
     re.IGNORECASE,
 )
-FEISHU_CHANNEL_RE = re.compile(
-    r'<channel\s+source=(?:"plugin:feishu:[^"]*"|\\"plugin:feishu:[^"]*\\")(?P<attrs>[^>]*)>',
+TELEGRAM_CHANNEL_RE = re.compile(
+    r'<channel\s+source="plugin:telegram:[^"]*"(?P<attrs>[^>]*)>',
     re.IGNORECASE,
 )
 CHAT_ID_RE = re.compile(r'chat_id="([^"]+)"')
 MSG_ID_RE = re.compile(r'message_id="([^"]+)"')
-TOKEN_ENV_PATH = Path.home() / ".claude" / "channels" / "telegram" / ".env"
-BOT_API_BASE = "https://api.telegram.org"
-TELEGRAM_MAX_LEN = 4096
+FEISHU_API_BASE = "https://open.feishu.cn/open-apis"
+FEISHU_MAX_LEN = 4000  # Feishu text message limit
 
 _DEFAULT_LOG_DIR = Path(os.environ.get("BRIDGE_LOG_DIR") or (Path.home() / "onyx-claude-logs"))
 DELIVERY_LOG = Path(
@@ -45,8 +43,7 @@ DELIVERY_LOG = Path(
 def _log(event: str, **fields) -> None:
     try:
         DELIVERY_LOG.parent.mkdir(parents=True, exist_ok=True)
-        import time as _t
-        rec = {"ts": _t.strftime("%Y-%m-%dT%H:%M:%S"), "event": event, **fields}
+        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "event": event, **fields}
         with open(DELIVERY_LOG, "a") as f:
             f.write(json.dumps(rec) + "\n")
     except Exception:
@@ -176,13 +173,13 @@ def _last_known_chat_id() -> str | None:
             rec = json.loads(line)
         except Exception:
             continue
-        if rec.get("event") == "send_ok" and rec.get("chat_id"):
+        if rec.get("event") == "send_ok" and rec.get("chat_id") and rec.get("channel") == "feishu":
             return rec["chat_id"]
     return None
 
 
 def _extract_channel_info(user_text: str) -> tuple[str | None, str | None]:
-    m = TELEGRAM_CHANNEL_RE.search(user_text)
+    m = FEISHU_CHANNEL_RE.search(user_text)
     if not m:
         return None, None
     attrs = m.group("attrs") or ""
@@ -191,41 +188,81 @@ def _extract_channel_info(user_text: str) -> tuple[str | None, str | None]:
     return (chat.group(1) if chat else None, mid.group(1) if mid else None)
 
 
-def _load_bot_token() -> str | None:
-    env = os.environ.get("TELEGRAM_BOT_TOKEN")
-    if env:
-        return env.strip()
-    if not TOKEN_ENV_PATH.exists():
-        return None
-    for line in TOKEN_ENV_PATH.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            continue
-        k, _, v = line.partition("=")
-        if k.strip() == "TELEGRAM_BOT_TOKEN":
-            return v.strip().strip('"').strip("'")
+def _get_feishu_creds() -> tuple[str | None, str | None]:
+    """Load Feishu app_id and app_secret from env or config file."""
+    app_id = os.environ.get("FEISHU_APP_ID")
+    app_secret = os.environ.get("FEISHU_APP_SECRET")
+    if app_id and app_secret:
+        return app_id.strip(), app_secret.strip()
+
+    config_path = Path.home() / ".lark-cli" / "openclaw" / "config.json"
+    if config_path.exists():
+        try:
+            cfg = json.loads(config_path.read_text())
+            apps = cfg.get("apps", [])
+            if apps:
+                app = apps[0]
+                app_id = app.get("appId")
+                # app_secret is stored in keychain, referenced as "source": "keychain"
+                # We need to load it from keychain or env
+                app_secret_source = app.get("appSecret", {}).get("source")
+                if app_secret_source == "keychain":
+                    keychain_id = app.get("appSecret", {}).get("id")
+                    if keychain_id:
+                        import subprocess
+                        try:
+                            result = subprocess.run(
+                                ["security", "find-generic-password", "-s", keychain_id, "-w"],
+                                capture_output=True, text=True, timeout=5,
+                            )
+                            if result.returncode == 0:
+                                app_secret = result.stdout.strip()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+    return app_id, app_secret
+
+
+def _get_tenant_access_token(app_id: str, app_secret: str) -> str | None:
+    """Obtain Feishu tenant access token."""
+    import subprocess
+    url = f"{FEISHU_API_BASE}/auth/v3/tenant_access_token/internal"
+    payload = json.dumps({"app_id": app_id, "app_secret": app_secret})
+    try:
+        proc = subprocess.run(
+            ["curl", "-sS", "--fail-with-body", "--max-time", "15",
+             "-X", "POST", "-H", "Content-Type: application/json",
+             "-d", payload, url],
+            capture_output=True, text=True, timeout=20,
+        )
+        if proc.returncode != 0:
+            return None
+        data = json.loads(proc.stdout)
+        if data.get("code") == 0:
+            return data.get("tenant_access_token")
+    except Exception:
+        pass
     return None
 
 
-def _chunk_for_telegram(text: str) -> list[str]:
+def _chunk_for_feishu(text: str) -> list[str]:
     text = text.strip()
-    if len(text) <= TELEGRAM_MAX_LEN:
+    if len(text) <= FEISHU_MAX_LEN:
         return [text] if text else []
     chunks: list[str] = []
     remaining = text
-    while len(remaining) > TELEGRAM_MAX_LEN:
-        window = remaining[:TELEGRAM_MAX_LEN]
+    while len(remaining) > FEISHU_MAX_LEN:
+        window = remaining[:FEISHU_MAX_LEN]
         for sep in ("\n\n", "\n", ". ", " "):
             idx = window.rfind(sep)
-            if idx > TELEGRAM_MAX_LEN // 2:
+            if idx > FEISHU_MAX_LEN // 2:
                 chunks.append(remaining[:idx].rstrip())
                 remaining = remaining[idx + len(sep):].lstrip()
                 break
         else:
-            chunks.append(remaining[:TELEGRAM_MAX_LEN])
-            remaining = remaining[TELEGRAM_MAX_LEN:]
+            chunks.append(remaining[:FEISHU_MAX_LEN])
+            remaining = remaining[FEISHU_MAX_LEN:]
     if remaining:
         chunks.append(remaining)
     return chunks
@@ -237,54 +274,37 @@ def _send_message(
     text: str,
     reply_to: str | None,
 ) -> tuple[bool, str]:
-    payload: dict = {"chat_id": chat_id, "text": text}
+    """Send text message via Feishu Bot API."""
+    import subprocess
+    url = f"{FEISHU_API_BASE}/im/v1/messages?receive_id_type=chat_id"
+    payload = {
+        "receive_id": chat_id,
+        "msg_type": "text",
+        "content": json.dumps({"text": text}),
+    }
     if reply_to:
-        payload["reply_parameters"] = {"message_id": int(reply_to), "allow_sending_without_reply": True}
-    sink = os.environ.get("STOP_HOOK_TEST_SINK")
-    if sink:
-        with open(sink, "a") as f:
-            f.write(json.dumps(payload) + "\n")
-        return True, ""
-    url = f"{BOT_API_BASE}/bot{token}/sendMessage"
-    # Use curl instead of urllib. UAE ISP intermittently breaks Python's
-    # ssl.SSLContext TLS handshake to api.telegram.org; curl's libssl/openssl
-    # path handles the same conditions cleanly. Shells out per attempt.
-    import subprocess as _subprocess
-    import shlex as _shlex
-
-    form_args: list[str] = []
-    for k, v in payload.items():
-        sv = json.dumps(v) if not isinstance(v, str) else v
-        form_args.extend(["--data-urlencode", f"{k}={sv}"])
+        payload["reply_in_thread"] = True
 
     last_err = ""
     for attempt in range(4):
         if attempt > 0:
-            import time as _retry_time
-            _retry_time.sleep(0.5 * (2 ** (attempt - 1)))  # 0.5s, 1s, 2s
+            time.sleep(0.5 * (2 ** (attempt - 1)))  # 0.5s, 1s, 2s
         try:
-            cmd = [
-                "curl", "-sS", "--fail-with-body",
-                "--max-time", "30",
-                "--connect-timeout", "10",
-                "--retry", "0",  # we handle retries ourselves
-                "-X", "POST",
-                *form_args,
-                url,
-            ]
-            proc = _subprocess.run(
-                cmd, capture_output=True, text=True, timeout=35,
+            proc = subprocess.run(
+                ["curl", "-sS", "--fail-with-body", "--max-time", "30",
+                 "--connect-timeout", "10", "-X", "POST",
+                 "-H", f"Authorization: Bearer {token}",
+                 "-H", "Content-Type: application/json",
+                 "-d", json.dumps(payload), url],
+                capture_output=True, text=True, timeout=35,
             )
             if proc.returncode != 0:
                 last_err = f"curl exit {proc.returncode}: {(proc.stderr or proc.stdout)[:200].strip()}"
-                # Telegram 4xx (bad payload, invalid chat) won't recover via retry.
-                # curl --fail-with-body sets exit 22 for HTTP >= 400; check the body
-                # for Telegram's "ok=false" + non-server error, bail early.
                 if proc.returncode == 22 and proc.stdout:
                     try:
                         parsed = json.loads(proc.stdout)
                         if not parsed.get("ok") and parsed.get("error_code", 500) < 500:
-                            return False, parsed.get("description", proc.stdout)
+                            return False, parsed.get("msg", proc.stdout)
                     except Exception:
                         pass
                 continue
@@ -293,13 +313,13 @@ def _send_message(
             except Exception as e:
                 last_err = f"json parse: {e}: {proc.stdout[:200]}"
                 continue
-            if not parsed.get("ok"):
-                return False, parsed.get("description", proc.stdout)
+            if parsed.get("code") != 0:
+                return False, parsed.get("msg", proc.stdout)
             return True, ""
-        except _subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired:
             last_err = "curl subprocess timeout (>35s)"
         except FileNotFoundError:
-            return False, "curl not found on PATH; install curl or restore urllib path"
+            return False, "curl not found on PATH"
         except Exception as e:
             last_err = f"{type(e).__name__}: {e}"
     return False, last_err
@@ -312,22 +332,20 @@ def main() -> int:
         payload = {}
 
     transcript_path = payload.get("transcript_path")
-    _log("hook_start", transcript=bool(transcript_path))
+    _log("feishu_hook_start", transcript=bool(transcript_path))
     if not transcript_path:
         return 0
 
-    # If this is a Feishu channel message, let stop_feishu.py handle it
+    # If this is a Telegram channel message, let stop.py handle it
     messages_raw = Path(transcript_path).read_text() if Path(transcript_path).exists() else ""
-    if "plugin:feishu:" in messages_raw:
-        _log("skip", reason="feishu_channel_delegated")
+    if "plugin:telegram:" in messages_raw:
+        _log("feishu_skip", reason="telegram_channel_delegated")
         return 0
 
-    import time as _t
     messages: list[dict] = []
     user_msg = None
     assistant_msgs: list[dict] = []
     had_text = False
-    attempt = 0
     for attempt in range(20):
         messages = _read_transcript(Path(transcript_path))
         user_msg, assistant_msgs = _last_user_and_tail_assistant(messages)
@@ -337,19 +355,15 @@ def main() -> int:
                 break
         if user_msg is None or not assistant_msgs:
             break
-        _t.sleep(0.5)
+        time.sleep(0.5)
     if user_msg is None or not assistant_msgs:
-        _log("skip", reason="no_anchor_or_tail", attempts=attempt + 1)
+        _log("feishu_skip", reason="no_anchor_or_tail", attempts=attempt + 1)
         return 0
     if not had_text:
-        _log("skip", reason="no_tail_text_after_retries", attempts=attempt + 1)
+        _log("feishu_skip", reason="no_tail_text_after_retries", attempts=attempt + 1)
         return 0
 
-    # ── Telemetry FIRST (always, before any delivery-path early returns) ──
-    # Previously this lived after the reply_tool_called / no_chat_id early
-    # exits, which meant any turn delivered via reply tool or fired from CLI
-    # was silently dropped from metacog. Move it here so it fires for every
-    # assistant turn regardless of how the text gets to the user.
+    # Telemetry FIRST
     _early_buf = "\n\n".join(t for t in (_message_text(am).strip() for am in assistant_msgs) if t)
     _early_tool_uses: list[str] = []
     for am in assistant_msgs:
@@ -359,7 +373,7 @@ def main() -> int:
         _early_buf,
         _early_tool_uses,
         session_id=payload.get("session_id"),
-        channel="telegram" if _inbound_chat_pre else "cli",
+        channel="feishu" if _inbound_chat_pre else "cli",
     )
 
     inbound_text = _message_text(user_msg)
@@ -378,76 +392,66 @@ def main() -> int:
         chat_id, reply_msg_id = latest_chat_id, latest_reply_to
 
     # Skip delivery if this is an OpenClaw-managed native channel.
-    # OpenClaw already delivers responses to Telegram/Feishu natively.
+    # OpenClaw already delivers responses to Feishu natively.
     # We still run metacog telemetry but skip the manual send.
     if os.environ.get("OBL_SKIP_NATIVE_CHANNELS") == "1" and chat_id:
-        _log("openclaw_managed_skip", reason="native_channel", chat_id=chat_id)
+        _log("feishu_openclaw_managed_skip", reason="native_channel", chat_id=chat_id)
         return 0
 
     if not chat_id:
         chat_id = _last_known_chat_id()
         reply_msg_id = None
         if not chat_id:
-            _log("skip", reason="no_channel_tag")
+            _log("feishu_skip", reason="no_channel_tag")
             return 0
-        _log("fallback", reason="post_compaction_chat_id", chat_id=chat_id)
+        _log("feishu_fallback", reason="post_compaction_chat_id", chat_id=chat_id)
 
-    for am in assistant_msgs:
-        if TELEGRAM_REPLY_TOOL in _tool_uses(am):
-            _log("skip", reason="reply_tool_called", chat_id=chat_id)
-            return 0
     parts = [t for t in (_message_text(am).strip() for am in assistant_msgs) if t]
     buf = "\n\n".join(parts) if parts else ""
-    # (telemetry was already written above, before delivery-path branches)
 
     if not parts:
-        _log("skip", reason="no_text", chat_id=chat_id)
+        _log("feishu_skip", reason="no_text", chat_id=chat_id)
         return 0
 
+    # Deduplication
     import hashlib
     sig = hashlib.sha1(f"{chat_id}:{buf}".encode()).hexdigest()[:12]
-    # Dedup logic (May 3 v3): the May 3 v2 patch introduced a regression — same
-    # content sig was being sent repeatedly across turns (transcript-reading
-    # race causing hook to grab stale assistant text). Restore the original
-    # last-20-events window AND add a 30-minute hard time cap as a guard against
-    # the original false-positive concern (legit same-content repeat after a long
-    # gap). 30 min is long enough to absorb any reasonable repeat-question-with-
-    # same-answer pattern, short enough that a fresh-day greeting still sends.
     if DELIVERY_LOG.exists():
-        import time as _t
-        from datetime import datetime as _dt
-        now_epoch = _t.time()
+        now_epoch = time.time()
+        from datetime import datetime as dt
         for line in DELIVERY_LOG.read_text().splitlines()[-20:]:
             try:
                 rec = json.loads(line)
             except Exception:
                 continue
-            if rec.get("event") != "send_ok" or rec.get("sig") != sig:
+            if rec.get("event") != "send_ok" or rec.get("sig") != sig or rec.get("channel") != "feishu":
                 continue
-            # Same content sig in the last 20 events → suppress UNLESS that
-            # prior send was >30 min ago (in which case treat as legitimate
-            # fresh repeat).
             try:
-                prev_epoch = _dt.fromisoformat(rec.get("ts", "")).timestamp()
-                if now_epoch - prev_epoch > 1800:  # >30 min ago = legit repeat
+                prev_epoch = dt.fromisoformat(rec.get("ts", "")).timestamp()
+                if now_epoch - prev_epoch > 1800:
                     continue
             except Exception:
-                pass  # if ts unparseable, fall through to dedup
-            _log("skip", reason="duplicate", chat_id=chat_id, sig=sig)
+                pass
+            _log("feishu_skip", reason="duplicate", chat_id=chat_id, sig=sig)
             return 0
+
     if not buf.strip():
-        _log("skip", reason="no_text", chat_id=chat_id)
+        _log("feishu_skip", reason="no_text", chat_id=chat_id)
         return 0
 
-    token = _load_bot_token()
-    if not token:
+    app_id, app_secret = _get_feishu_creds()
+    if not app_id or not app_secret:
         sys.stderr.write(
-            "Telegram auto-delivery: TELEGRAM_BOT_TOKEN not found in env or "
-            f"{TOKEN_ENV_PATH}. Cannot deliver this turn's text to Telegram.\n"
+            "Feishu auto-delivery: FEISHU_APP_ID or FEISHU_APP_SECRET not found.\n"
         )
         return 2
 
-    chunks = _chunk_for_telegram(buf)
+    token = _get_tenant_access_token(app_id, app_secret)
+    if not token:
+        sys.stderr.write("Feishu auto-delivery: could not obtain tenant access token.\n")
+        return 2
+
+    chunks = _chunk_for_feishu(buf)
     first = True
     for chunk in chunks:
         ok, err = _send_message(
@@ -457,15 +461,14 @@ def main() -> int:
             reply_to=reply_msg_id if first else None,
         )
         if not ok:
-            _log("send_fail", chat_id=chat_id, error=err)
+            _log("feishu_send_fail", chat_id=chat_id, error=err)
             sys.stderr.write(
-                f"Telegram auto-delivery failed: {err}. chat_id={chat_id}. "
-                f"The assistant's text did not reach the user.\n"
+                f"Feishu auto-delivery failed: {err}. chat_id={chat_id}.\n"
             )
             return 2
         first = False
-    _log("send_ok", chat_id=chat_id, reply_to=reply_msg_id, chunks=len(chunks),
-         bytes=sum(len(c) for c in chunks), sig=sig)
+    _log("feishu_send_ok", chat_id=chat_id, reply_to=reply_msg_id, chunks=len(chunks),
+         bytes=sum(len(c) for c in chunks), sig=sig, channel="feishu")
     return 0
 
 
