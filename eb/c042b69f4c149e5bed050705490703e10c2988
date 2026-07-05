@@ -1,0 +1,41 @@
+hooks/stop_feishu.py
+  s_85d290b76eaf49::t_97882ad1fac4b9 341
+  s_85d290b76eaf49::t_fc88f57de0dd11 27-30
+  s_85d290b76eaf49::t_da80fa02be837d 1-26,31-338,345-393,401-476
+  s_85d290b76eaf49::t_0f870a76594584 339-340,342-344
+  s_85d290b76eaf49::t_8a3590e4b781de 394-400
+hooks/user_prompt_submit_feishu.py
+  s_85d290b76eaf49::t_281f5393095cf8 125,127
+  s_85d290b76eaf49::t_fa87cd68bcd938 21-22
+  s_85d290b76eaf49::t_2f59ccf83fd6f4 1-20,23-124,126,128-193
+hooks/init_feishu.py
+  s_85d290b76eaf49::t_611887ec4e3a04 1-18,21-70
+  s_85d290b76eaf49::t_780fcaed4b2452 19-20
+hooks/post_compact_feishu.py
+  s_85d290b76eaf49::t_0c2dbc777ad098 16-17,20
+  s_85d290b76eaf49::t_0ac0b025ed5ada 1-15,18-19,21-52
+hooks/stop.py
+  s_85d290b76eaf49::t_6153cc87a3741a 25,29
+  s_85d290b76eaf49::t_b99cd6c9a10538 319-320,322-324
+  s_85d290b76eaf49::t_e92c666af19714 28
+  s_85d290b76eaf49::t_5f185c7115ee8a 321
+  s_85d290b76eaf49::t_042e9b58e9c3e1 380-386
+hooks/pre_compact_feishu.py
+  ai_agent 1-66
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.28-trip",
+  "base_commit_sha": "ebc042b69f4c149e5bed050705490703e10c2988",
+  "prompts": {},
+  "sessions": {
+    "s_85d290b76eaf49": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6cd351e0-f1c4-49ad-a5d0-6a28f4c21dda",
+        "model": "MiniMax-M2.7"
+      },
+      "human_author": "Anuj Bansal <anuj.bansal@trip.com>"
+    }
+  }
+}
