@@ -168,3 +168,15 @@ echo "To install:"
 echo "  for f in $PLIST_DIR/*.plist; do"
 echo "    cp \"\$f\" ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/\$(basename \"\$f\")"
 echo "  done"
+
+# === FEISHU PROXY (KeepAlive webhook server) ===
+FEISHU_PROXY_LABEL="${LABEL_PREFIX}.feishu-proxy"
+FEISHU_PROXY_FILE="$PLIST_DIR/${FEISHU_PROXY_LABEL}.plist"
+PYTHON_BIN="$(command -v python3 || echo /opt/homebrew/bin/python3)"
+sed \
+    -e "s|__PYTHON__|${PYTHON_BIN}|g" \
+    -e "s|__BRIDGE_DIR__|${BRIDGE_DIR}|g" \
+    -e "s|__HOME__|${HOME}|g" \
+    -e "s|__LOG_DIR__|${LOG_DIR}|g" \
+    "$BRIDGE_DIR/launchd/jobs/com.onyx.claude.feishu-proxy.plist.template" > "$FEISHU_PROXY_FILE"
+echo "Generated: $FEISHU_PROXY_FILE"
